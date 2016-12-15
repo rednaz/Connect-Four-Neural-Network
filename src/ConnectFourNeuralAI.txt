@@ -1,0 +1,376 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using GameBase;
+using ZBase.Math.Graph;
+
+namespace AiBase
+{
+    public class ConnectFourNeuralAI
+    {
+        public Graph<INeuron> Brain { get; set; }
+        private static readonly Random Random = new Random();
+
+        public int Fitness { get; set; }
+
+        public ConnectFourNeuralAI()
+        {
+            var methodInfo = typeof(ConnectFourBoard).GetMethod(nameof(ConnectFourBoard.AddPiece));
+
+            var actions = new List<NeuronAction>
+            {
+                new NeuronAction(methodInfo, new object[]{Player.X, 0}),
+                new NeuronAction(methodInfo, new object[]{Player.X, 1}),
+                new NeuronAction(methodInfo, new object[]{Player.X, 2}),
+                new NeuronAction(methodInfo, new object[]{Player.X, 3}),
+                new NeuronAction(methodInfo, new object[]{Player.X, 4}),
+                new NeuronAction(methodInfo, new object[]{Player.X, 5}),
+                new NeuronAction(methodInfo, new object[]{Player.X, 6}),
+            };
+
+            Brain = new Graph<INeuron>();
+
+            var inputNodes = new List<Node<INeuron>>();
+
+            for (int row = 0; row < 6; row++)
+                for (int column = 0; column < 7; column++)
+                {
+                    var node = new Node<INeuron>(new InputNeuron(new Coordinate(column, row)));
+                    inputNodes.Add(node);
+                    Brain.AddNode(node);
+                }
+
+            var hiddenNodes = new List<Node<INeuron>>();
+
+            for (int i = 0; i < 50; i++)
+            {
+                var node = new Node<INeuron>(new HiddenNeuron());
+                hiddenNodes.Add(node);
+                Brain.AddNode(node);
+            }
+
+            var actionNodes = new List<Node<INeuron>>();
+
+            foreach (var action in actions)
+            {
+                var node = new Node<INeuron>(new ActionNeuron(action));
+                actionNodes.Add(node);
+                Brain.AddNode(node);
+            }
+
+            foreach (var inputNode in inputNodes)
+                foreach (var hiddenNode in hiddenNodes)
+                    Brain.AddDirectedEdge(inputNode, hiddenNode, GetRandomWeight());
+
+            foreach (var hiddenNode in hiddenNodes)
+                foreach (var actionNode in actionNodes)
+                    Brain.AddDirectedEdge(hiddenNode, actionNode, GetRandomWeight());
+        }
+
+        public ConnectFourNeuralAI(string encodedBrain, bool mutate = true)
+        {
+            Brain = new Graph<INeuron>();
+            var encodedNeurons = new List<EncodedNeuron>();
+
+            foreach (var encodedString in encodedBrain.Split('|'))
+            {
+                var encodedNeuron = new EncodedNeuron { EncodedString = encodedString };
+                var encodedSubString = encodedString.Split(',');
+
+                var queue = new Queue<string>(encodedSubString);
+
+                var next = queue.Dequeue();
+
+                if (next == "Node")
+                {
+                    encodedNeuron.ID = Convert.ToInt32(queue.Dequeue());
+                    encodedNeuron.Node =
+                        new Node<INeuron>(
+                            new InputNeuron(new Coordinate(Convert.ToInt32(queue.Dequeue()),
+                                Convert.ToInt32(queue.Dequeue()))));
+                    Brain.AddNode(encodedNeuron.Node);
+                }
+                else
+                {
+                    while (next != "Node")
+                    {
+                        next = queue.Dequeue();
+                    }
+
+                    encodedNeuron.ID = Convert.ToInt32(queue.Dequeue());
+                }
+
+                encodedNeurons.Add(encodedNeuron);
+            }
+
+            foreach (var encodedNeuron in encodedNeurons.Where(x => x.Node == null))
+            {
+                var queue = new Queue<string>(encodedNeuron.EncodedString.Split(','));
+
+                string next;
+
+                do
+                {
+                    next = queue.Dequeue();
+                } while (next != "Node");
+
+                queue.Dequeue();
+
+                if (!queue.Any())
+                {
+                    encodedNeuron.Node = new Node<INeuron>(new HiddenNeuron());
+                }
+                else
+                {
+                    queue.Dequeue();
+                    encodedNeuron.Node =
+                        new Node<INeuron>(
+                            new ActionNeuron(
+                                new NeuronAction(typeof(ConnectFourBoard).GetMethod(nameof(ConnectFourBoard.AddPiece)),
+                                    new object[] { (Player)Enum.Parse(typeof(Player), queue.Dequeue(), true), Convert.ToInt32(queue.Dequeue()) })));
+                }
+
+                Brain.AddNode(encodedNeuron.Node);
+            }
+
+            foreach (var encodedNeuron in encodedNeurons.Where(x => x.Node.Value.GetType().Name != nameof(InputNeuron)))
+            {
+                var queue = new Queue<string>(encodedNeuron.EncodedString.Split(','));
+
+                var next = queue.Dequeue();
+
+                do
+                {
+                    var prevNode = encodedNeurons.First(x => x.ID == Convert.ToInt32(next)).Node;
+
+                    Brain.AddDirectedEdge(prevNode, encodedNeuron.Node, Convert.ToInt32(queue.Dequeue()));
+
+                    next = queue.Dequeue();
+                } while (next != "Node");
+            }
+
+            if (mutate)
+                for (int i = 0; i < 10; i++)
+                {
+                    Mutate();
+                }
+        }
+
+        private void Mutate()
+        {
+            var edges = Brain.Nodes.SelectMany(n => n.Edges).ToList();
+            var mutateOdds = Random.Next(edges.Count);
+            edges[mutateOdds].Weight = GetRandomWeight();
+        }
+
+        private int GetRandomWeight()
+        {
+            return Random.Next(100) + 1;
+        }
+
+        public IEnumerable<NeuronAction> GetActions(Board board)
+        {
+            foreach (var node in Brain.Nodes)
+            {
+                node.Value.CurrentValue = 0;
+            }
+
+            var inputNodes = Brain.Nodes.Where(x => x.Value.GetType() == typeof(InputNeuron));
+
+            var queue = new Queue<Node<INeuron>>();
+
+            var visited = new List<Node<INeuron>>();
+
+            foreach (var inputNode in inputNodes)
+            {
+                inputNode.Value.CurrentValue =
+                    Convert.ToInt32(
+                        board.Nodes.First(
+                            x =>
+                                ((Coordinate)x.Value).X == ((InputNeuron)inputNode.Value).Coordinate.X &&
+                                ((Coordinate)x.Value).Y == ((InputNeuron)inputNode.Value).Coordinate.Y).Value.Player);
+
+                queue.Enqueue(inputNode);
+                visited.Add(inputNode);
+            }
+
+            while (queue.Any())
+            {
+                var node = queue.Dequeue();
+
+                if (node.Value.GetType() != typeof(InputNeuron))
+                {
+                    node.Value.CurrentValue = Sigma(node.Value.CurrentValue);
+                }
+
+                foreach (var edge in node.Edges)
+                {
+                    edge.Node.Value.CurrentValue += node.Value.CurrentValue * edge.Weight / 100;
+
+                    if (!visited.Contains(edge.Node))
+                    {
+                        queue.Enqueue(edge.Node);
+                        visited.Add(edge.Node);
+                    }
+                }
+            }
+
+            var actionNeurons = Brain.Nodes.Where(x => x.Value.GetType() == typeof(ActionNeuron)).Select(x => x.Value).ToList();
+
+            foreach (var action in actionNeurons.OrderByDescending(x => x.CurrentValue).Select(x => ((ActionNeuron)x).Action))
+            {
+                yield return action;
+            }
+        }
+
+        private static double Sigma(double value)
+        {
+            return Math.Tan(value);
+        }
+
+        public string EncodeBrain()
+        {
+            var encodedNeurons = new List<EncodedNeuron>();
+            var inputNodes = Brain.Nodes.Where(x => x.Value.GetType() == typeof(InputNeuron)).ToList();
+
+            var encodeNodeCount = 1;
+
+            foreach (var inputNode in inputNodes)
+            {
+                var coordinate = ((InputNeuron)inputNode.Value).Coordinate;
+                var encodedString = $"Node,{encodeNodeCount},{coordinate.X},{coordinate.Y}";
+                var newEncodedNeuron = new EncodedNeuron { ID = encodeNodeCount, EncodedString = encodedString, Node = inputNode };
+
+                encodedNeurons.Add(newEncodedNeuron);
+
+                encodeNodeCount++;
+            }
+
+            var queue = new Queue<Node<INeuron>>();
+
+            foreach (var inputNode in inputNodes)
+            {
+                queue.Enqueue(inputNode);
+            }
+
+            while (queue.Any())
+            {
+                var node = queue.Dequeue();
+
+                foreach (var edge in node.Edges)
+                {
+                    var edgeEncodedNode = encodedNeurons.FirstOrDefault(x => x.Node.Equals(edge.Node));
+
+                    if (edgeEncodedNode == null)
+                    {
+                        queue.Enqueue(edge.Node);
+
+                        var encodedString = string.Empty;
+
+                        if (edge.Node.Value.GetType() != typeof(ActionNeuron))
+                        {
+                            encodedString = $"Node,{encodeNodeCount}";
+                        }
+
+                        edgeEncodedNode = new EncodedNeuron
+                        {
+                            ID = encodeNodeCount,
+                            EncodedString = encodedString,
+                            Node = edge.Node
+                        };
+                        encodedNeurons.Add(edgeEncodedNode);
+
+                        if (edge.Node.Value.GetType() != typeof(ActionNeuron))
+                            encodeNodeCount++;
+                    }
+
+                    var currentEncodedNode = encodedNeurons.First(x => x.Node.Equals(node));
+
+                    edgeEncodedNode.EncodedString = $"{currentEncodedNode.ID},{edge.Weight}," +
+                                                    edgeEncodedNode.EncodedString;
+                }
+            }
+
+            foreach (var encodedNeuron in encodedNeurons.Where(x => x.Node.Value.GetType() == typeof(ActionNeuron)))
+            {
+                encodedNeuron.ID = encodeNodeCount;
+                encodedNeuron.EncodedString += $"Node,{encodeNodeCount}";
+
+                var action = ((ActionNeuron)encodedNeuron.Node.Value).Action;
+                encodedNeuron.EncodedString += $",{action.Action.Name},{string.Join(",", action.Parameters)}";
+
+                encodeNodeCount++;
+            }
+
+            return string.Join("|", encodedNeurons.OrderBy(x => x.ID).Select(x => x.EncodedString));
+        }
+
+        public void SetPlayer(Player player)
+        {
+            var actionNodes = Brain.Nodes.Where(x => x.Value.GetType() == typeof(ActionNeuron));
+
+            foreach (var actionNode in actionNodes)
+            {
+                ((ActionNeuron)actionNode.Value).Action.Parameters[0] = player;
+            }
+        }
+    }
+
+    public class NeuronAction
+    {
+        public MethodInfo Action { get; }
+        public object[] Parameters { get; }
+
+        public NeuronAction(MethodInfo action, object[] parameters)
+        {
+            Action = action;
+            Parameters = parameters;
+        }
+
+        public bool ExecuteAction(Board board)
+        {
+            return (bool)Action.Invoke(board, Parameters);
+        }
+    }
+
+    public class EncodedNeuron
+    {
+        public int ID { get; set; }
+        public Node<INeuron> Node { get; set; }
+        public string EncodedString { get; set; }
+    }
+
+    public interface INeuron
+    {
+        double CurrentValue { get; set; }
+    }
+
+    public class InputNeuron : INeuron
+    {
+        public double CurrentValue { get; set; }
+
+        public Coordinate Coordinate { get; private set; }
+
+        public InputNeuron(Coordinate coordinate)
+        {
+            Coordinate = coordinate;
+        }
+    }
+
+    public class HiddenNeuron : INeuron
+    {
+        public double CurrentValue { get; set; }
+    }
+
+    public class ActionNeuron : INeuron
+    {
+        public double CurrentValue { get; set; }
+        public NeuronAction Action { get; set; }
+
+        public ActionNeuron(NeuronAction action)
+        {
+            Action = action;
+        }
+    }
+}

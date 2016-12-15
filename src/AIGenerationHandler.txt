@@ -1,0 +1,310 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using GameBase;
+
+namespace AiBase
+{
+    public class AiGenerationHandler
+    {
+        private readonly int _sizeOfGeneration;
+        private readonly int _generationNumber;
+        private IList<ConnectFourNeuralAI> _generation;
+        private Random Random = new Random();
+        private byte _opponentDifficulty;
+
+        public AiGenerationHandler(int sizeOfGeneration, int generationNumber, byte opponentDifficulty = 2)
+        {
+            _sizeOfGeneration = sizeOfGeneration;
+            _generationNumber = generationNumber;
+            _opponentDifficulty = opponentDifficulty;
+            _generation = new List<ConnectFourNeuralAI>();
+
+            if (_generationNumber != 1) return;
+
+            for (var count = 0; count < _sizeOfGeneration; count++)
+            {
+                _generation.Add(new ConnectFourNeuralAI());
+            }
+        }
+
+        public AiGenerationHandler(int sizeOfGeneration, int generationNumber, string generationFilePath, byte opponentDifficulty = 2)
+        {
+            _sizeOfGeneration = sizeOfGeneration;
+            _generationNumber = generationNumber;
+            _opponentDifficulty = opponentDifficulty;
+            _generation = new List<ConnectFourNeuralAI>();
+
+            using (var sr = new StreamReader(generationFilePath))
+                for (int count = 0; count < _sizeOfGeneration; count++)
+                {
+                    _generation.Add(new ConnectFourNeuralAI(sr.ReadLine(), false));
+                }
+        }
+
+        public AiGenerationHandler BuildNextGeneration()
+        {
+            var child = 0;
+
+            foreach (var brain in _generation)
+            {
+                child++;
+                var endBoard = PlayGame(brain, child);
+                GenerateFitness(brain, endBoard);
+                if (endBoard.Nodes.Count(x => x.Value.Player != Player.None) % 2 == 1)
+                {
+                    brain.Fitness = int.MaxValue;
+                }
+            }
+
+
+            //if (_generation.Count(x => x.Fitness == int.MaxValue) > 20)
+            //    _opponentDifficulty++;
+
+            //if (_opponentDifficulty < 5 && _opponentDifficulty >= 2)
+            //    _opponentDifficulty = (byte)(_generationNumber / 50 + 1);
+
+            var newGeneration = new AiGenerationHandler(_sizeOfGeneration, _generationNumber + 1, _opponentDifficulty);
+
+            var aiToSurviveThroughToNextGeneration = _generation.Count(x => x.Fitness == int.MaxValue) > 10
+                ? _generation.Count(x => x.Fitness == int.MaxValue)
+                : 10;
+
+            _generation = _generation.OrderBy(x => x.Fitness).ToList();
+
+            if (aiToSurviveThroughToNextGeneration == _sizeOfGeneration)
+            {
+                Console.WriteLine("HOLY SHIT");
+                Console.ReadLine();
+            }
+
+            var ranks = _generation.GroupBy(x => x.Fitness);
+
+            var rankedAi = new List<Tuple<ConnectFourNeuralAI, int>>();
+            var rankCount = 0;
+            var rankValue = 1;
+
+            foreach (var rank in ranks)
+            {
+                foreach (var connectFourNeuralAi in rank)
+                {
+                    rankedAi.Add(new Tuple<ConnectFourNeuralAI, int>(connectFourNeuralAi, rankCount));
+                    rankCount += rankValue;
+                }
+                rankValue++;
+            }
+
+            rankedAi = rankedAi.OrderByDescending(x => x.Item2).ToList();
+
+            //foreach (var tuple in rankedAi)
+            //{
+            //    Console.WriteLine(tuple.Item1.EncodeBrain());
+            //}
+
+            for (int currentCount = 0; currentCount < aiToSurviveThroughToNextGeneration; currentCount++)
+            {
+                newGeneration._generation.Add(rankedAi[currentCount].Item1);
+            }
+
+            for (int childCount = 0; childCount < _sizeOfGeneration - aiToSurviveThroughToNextGeneration; childCount++)
+            {
+                var randomRank = Random.Next(rankCount);
+                var firstChild = rankedAi.First(x => x.Item2 <= randomRank).Item1;
+                var randomRank2 = Random.Next(rankCount);
+                var secondChild = rankedAi.First(x => x.Item2 <= randomRank2).Item1;
+
+                var newChild = Cross(firstChild, secondChild);
+
+                if (newChild.Brain.Nodes.Any(x => x.Value.GetType() == typeof(ActionNeuron)) &&
+                    newChild.Brain.Nodes.Any(x => x.Value.GetType() == typeof(InputNeuron)))
+                {
+                    newGeneration._generation.Add(newChild);
+                }
+                else
+                {
+                    childCount--;
+                }
+            }
+
+            return newGeneration;
+        }
+
+        private ConnectFourNeuralAI Cross(ConnectFourNeuralAI firstChild, ConnectFourNeuralAI secondChild)
+        {
+            var firstEncoding = firstChild.EncodeBrain();
+            var secondEncoding = secondChild.EncodeBrain();
+
+            var nodeSplit = Random.Next(Math.Min(firstEncoding.Count(x => x == '|'), secondEncoding.Count(x => x == '|'))) + 1;
+
+            string firstHalf;
+            string secondHalf;
+
+            if (firstEncoding.Count(x => x == '|') >= secondEncoding.Count(x => x == '|'))
+            {
+                firstHalf = string.Join("|", secondEncoding.Split('|').Take(nodeSplit));
+                secondHalf = string.Join("|", firstEncoding.Split('|').Skip(nodeSplit));
+            }
+            else
+            {
+                firstHalf = string.Join("|", firstEncoding.Split('|').Take(nodeSplit));
+                secondHalf = string.Join("|", secondEncoding.Split('|').Skip(nodeSplit));
+            }
+
+
+            //Console.WriteLine($"{firstHalf}|{secondHalf}");
+
+            if (!$"{firstHalf}|{secondHalf}".Contains("AddPiece"))
+            {
+
+            }
+
+            return new ConnectFourNeuralAI($"{firstHalf}|{secondHalf}");
+        }
+
+        private void GenerateFitness(ConnectFourNeuralAI brain, Board board)
+        {
+            var calcAi = new ConnectFourAI();
+
+            brain.Fitness = calcAi.Utility((ConnectFourBoard)board);
+        }
+
+        private int GenerateFitness(Board board)
+        {
+            var calcAi = new ConnectFourAI();
+
+            return calcAi.Utility((ConnectFourBoard)board);
+        }
+
+        private Board PlayGame(ConnectFourNeuralAI brain, int child)
+        {
+            var board = new ConnectFourBoard();
+
+            while (!board.IsTerminal)
+            {
+                foreach (var neuronAction in brain.GetActions(board))
+                {
+                    if (neuronAction.ExecuteAction(board))
+                        break;
+                }
+
+                PrintBoard(board, child);
+
+                var connectFourAi = new ConnectFourAI(_opponentDifficulty);
+
+                board = connectFourAi.GetNextBoardAsMin(board);
+
+                PrintBoard(board, child);
+            }
+
+            //Console.WriteLine(brain.EncodeBrain());
+
+            return board;
+        }
+
+        private Board PlayVsGame(ConnectFourNeuralAI xPlayer, ConnectFourNeuralAI oPlayer, int x, int o)
+        {
+            xPlayer.SetPlayer(Player.X);
+            oPlayer.SetPlayer(Player.O);
+
+            var board = new ConnectFourBoard();
+
+            while (!board.IsTerminal)
+            {
+                foreach (var neuronAction in xPlayer.GetActions(board))
+                {
+                    if (neuronAction.ExecuteAction(board))
+                        break;
+                }
+
+                PrintBoard(board, x, o);
+
+                if (board.IsTerminal) continue;
+
+                foreach (var neuronAction in oPlayer.GetActions(board))
+                {
+                    if (neuronAction.ExecuteAction(board))
+                        break;
+                }
+
+                PrintBoard(board, x, o);
+            }
+
+            return board;
+        }
+
+        public void PrintBoard(ConnectFourBoard board, int child)
+        {
+            Console.Clear();
+
+            Console.WriteLine("GENERATION {0} - {1}", _generationNumber, child);
+
+            for (int row = 5; row >= 0; row--)
+            {
+                for (int column = 6; column >= 0; column--)
+                {
+                    var currentPlayer =
+                        board.Nodes.First(
+                            node => ((Coordinate)node.Value).X == column && ((Coordinate)node.Value).Y == row).Value.Player;
+
+                    switch (currentPlayer)
+                    {
+                        case Player.None:
+                            Console.Write("+ ");
+                            break;
+                        case Player.X:
+                            Console.Write("X ");
+                            break;
+                        case Player.O:
+                            Console.Write("O ");
+                            break;
+                    }
+                }
+                Console.WriteLine();
+            }
+        }
+
+        public void PrintBoard(ConnectFourBoard board, int x, int o)
+        {
+            return;
+
+            Console.Clear();
+
+            Console.WriteLine("GENERATION {0} - {1} VS {2}", _generationNumber, x, o);
+
+            return;
+
+            for (int row = 5; row >= 0; row--)
+            {
+                for (int column = 6; column >= 0; column--)
+                {
+                    var currentPlayer =
+                        board.Nodes.First(
+                            node => ((Coordinate)node.Value).X == column && ((Coordinate)node.Value).Y == row).Value.Player;
+
+                    switch (currentPlayer)
+                    {
+                        case Player.None:
+                            Console.Write("+ ");
+                            break;
+                        case Player.X:
+                            Console.Write("X ");
+                            break;
+                        case Player.O:
+                            Console.Write("O ");
+                            break;
+                    }
+                }
+                Console.WriteLine();
+            }
+        }
+
+        public void SaveGeneration(int level)
+        {
+            var path = Path.Combine(Directory.GetCurrentDirectory(), "Generations",
+                "" + _generationNumber + ".txt");
+
+            File.WriteAllLines(path, _generation.Select(x => x.EncodeBrain()));
+        }
+    }
+}
